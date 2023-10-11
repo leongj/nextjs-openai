@@ -73,7 +73,6 @@ export async function POST(req: Request) {
             }
 
             // console.log('=== OPENAPI SPEC', plugin.openApiSpec);
-            // console.log('=== PATHS', plugin.openApiSpec.paths);
 
             // for each path/method in the openapi spec, 
             // find the operationId that matches the function name

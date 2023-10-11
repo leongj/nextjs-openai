@@ -1,3 +1,17 @@
+# NextJS OpenAI Plugins as Function Calls
+> WORK IN PROGRESS, MAY NEVER BE COMPLETED
+
+OpenAI GPT is well setup to call functions, and though public ChatGPT supports plugins, it's not clear how the two of them are related.
+
+This is an attempt to load OpenAI plugins and to offer them as callable functions to GPT function calling.
+
+
+
+
+---  
+
+# Default NextJS app bootstrap doc below
+
 This is a [Next.js](https://nextjs.org/) project bootstrapped with [`create-next-app`](https://github.com/vercel/next.js/tree/canary/packages/create-next-app).
 
 ## Getting Started
