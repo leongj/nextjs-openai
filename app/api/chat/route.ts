@@ -4,6 +4,7 @@ import OpenAI from 'openai';
 import { OpenAIStream, StreamingTextResponse } from 'ai';
 import { GPTPlugin, getPlugins } from '@/lib/plugins';
 import { functionsFromPlugin } from '@/lib/functions';
+import { resolveObjectURL } from 'buffer';
 
 const resource = process.env['AZURE_OPENAI_API_INSTANCE_NAME'];
 const deployment = process.env['AZURE_OPENAI_API_DEPLOYMENT_NAME'];
@@ -61,26 +62,59 @@ export async function POST(req: Request) {
 
             console.log("=== GPT CALLING FUNCTION", name, args);
 
+            // figure out which plugin the function belongs to
+            const pluginName = name.split('_')[0];
+            const functionName = name.split('_')[1];
+
+            // get the URL for the given plugin and function
+            const plugin = plugins.find((p) => p.name === pluginName);
+            if (!plugin) {
+                throw new Error(`Plugin ${pluginName} not found`);
+            }
+
+            // console.log('=== OPENAPI SPEC', plugin.openApiSpec);
+            // console.log('=== PATHS', plugin.openApiSpec.paths);
+
+            // for each path/method in the openapi spec, 
+            // find the operationId that matches the function name
+            for (const path in plugin.openApiSpec.paths) {
+                for (const method in plugin.openApiSpec.paths[path]) {
+                    const operation = plugin.openApiSpec.paths[path][method];
+
+                    if (operation.operationId === functionName) {
+
+                        console.log('=== OPERATION FOUND', operation);
+
+                        // Call the API
+                        const URL = plugin.openApiSpec.servers[0].url + path;
+                        console.log('=== FETCHING: ', URL);
+                        const res = await fetch(URL, {
+                            method: method,
+                            headers: {
+                                'Content-Type': 'application/json'
+                            },
+                            body: JSON.stringify(args)
+                        });
+
+                        const resJson = await res.json();
+
+                        console.log('=== RESPONSE', resJson);
+
+                        // `createFunctionCallMessages` constructs the relevant "assistant" and "function" messages for you
+                        const newMessages = createFunctionCallMessages(resJson);
+                        return openai.chat.completions.create({
+                            messages: [...messages, ...newMessages],
+                            stream: true,
+                            model: 'gpt-4',
+                            // see "Recursive Function Calls" below
+                            functions,
+                        });
+                    }
+                }
+            }
             
-
-
-            // TODO: call the API from the function call
-            // const URL = "https://echo-22222.azurewebsites.net/api/weather"
-
-            // const res = await fetch(URL);
-            // const weatherData = await res.json();
-
-            console.log('weatherData', weatherData);
-
-            // `createFunctionCallMessages` constructs the relevant "assistant" and "function" messages for you
-            const newMessages = createFunctionCallMessages(weatherData);
-            return openai.chat.completions.create({
-                messages: [...messages, ...newMessages],
-                stream: true,
-                model: 'gpt-4',
-                // see "Recursive Function Calls" below
-                functions,
-            });
+            // If we get here, we didn't find the function
+            throw new Error(`Function ${name} not found`);
         },
     });
 
