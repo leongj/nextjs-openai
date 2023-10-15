@@ -3,8 +3,15 @@
 import OpenAI from 'openai';
 import { OpenAIStream, StreamingTextResponse } from 'ai';
 import { GPTPlugin, getPlugins } from '@/lib/plugins';
-import { functionsFromPlugin } from '@/lib/functions';
+import type { OpenAI as OpenAIClient } from "openai";
+import { ChatOpenAI } from "langchain/chat_models/openai";
+import { BaseCallbackHandler } from "langchain/callbacks";
+import { AIMessage, BaseMessage, BaseMessageFields, ChatGeneration } from 'langchain/schema';
+import { createOpenAPIChain } from "langchain/chains";
+import { convertOpenAPISpecToOpenAIFunctions, functionsFromPlugin, parseOpenAPISpec } from '@/lib/openapi-functions';
+import { OpenAPISpec } from '@/lib/openapi-spec';
 import { resolveObjectURL } from 'buffer';
+import { parse } from 'path';
 
 const resource = process.env['AZURE_OPENAI_API_INSTANCE_NAME'];
 const deployment = process.env['AZURE_OPENAI_API_DEPLOYMENT_NAME'];
@@ -25,31 +32,42 @@ const openai = new OpenAI({
 // export const runtime = 'edge';
 
 
-
-
 // And use it like this:
 export async function POST(req: Request) {
     const { messages } = await req.json();
 
     const plugins: GPTPlugin[] = await getPlugins();
 
-    const functions : OpenAI.Chat.Completions.ChatCompletionCreateParams.Function[] = [];
+    const pluginsAsFns: OpenAIClient.Chat.Completions.ChatCompletionCreateParams.Function[] = [];
 
     // Iterate over all the plugins and store in the functions object
-    plugins.forEach((plugin) => {
-        const pluginFunctions = functionsFromPlugin(plugin);
-        functions.push(...pluginFunctions);
+    plugins.forEach(async (plugin) => {
+
+        // Check the length of the description, and truncate if necessary
+        const FN_DESC_MAX_CHARS = 1024; // Limit enforced by ChatCompletions API
+        let pluginDesc;
+        if (plugin.aiPlugin.description_for_model.length > FN_DESC_MAX_CHARS) {
+            console.log(`=== WARNING: Description for Plugin "${plugin.aiPlugin.name_for_model}" is too long, truncating to ${FN_DESC_MAX_CHARS} chars`);
+        } else {
+            pluginDesc = plugin.aiPlugin.description_for_model;
+        }
+
+        const newFunc: OpenAIClient.Chat.Completions.ChatCompletionCreateParams.Function = {
+            name: plugin.aiPlugin.name_for_model,
+            description: pluginDesc,
+            parameters: { "type": "object", "properties": {} },
+        };
+        pluginsAsFns.push(newFunc);
     });
 
-    console.log('=== FUNCTIONS', JSON.stringify(functions, null, 2));
+    console.log('\n=== MESSAGES', messages);
 
-    console.log('messages', messages);
-
+    // Call to completion API
     const response = await openai.chat.completions.create({
         model: 'gpt-4',
         stream: true,
         messages,
-        functions: functions
+        functions: pluginsAsFns
     });
 
     const stream = OpenAIStream(response, {
@@ -60,60 +78,53 @@ export async function POST(req: Request) {
             // NEXTJS: if you skip the function call and return nothing, the `function_call`
             // message will be sent to the client for it to handle
 
-            console.log("=== GPT CALLING FUNCTION", name, args);
+            console.log("\n=== GPT CALLED PLUGIN:", name, args);
 
-            // figure out which plugin the function belongs to
-            const pluginName = name.split('_')[0];
-            const functionName = name.split('_')[1];
-
-            // get the URL for the given plugin and function
-            const plugin = plugins.find((p) => p.name === pluginName);
+            // Check the plugins to ensure that the function exists
+            const plugin = plugins.find((p) => p.aiPlugin.name_for_model === name);
             if (!plugin) {
-                throw new Error(`Plugin ${pluginName} not found`);
+                throw new Error(`Plugin ${name} not found`);
             }
 
-            // console.log('=== OPENAPI SPEC', plugin.openApiSpec);
+            console.log("=== PLUGIN FOUND", plugin.aiPlugin.name_for_model);
 
-            // for each path/method in the openapi spec, 
-            // find the operationId that matches the function name
-            for (const path in plugin.openApiSpec.paths) {
-                for (const method in plugin.openApiSpec.paths[path]) {
-                    const operation = plugin.openApiSpec.paths[path][method];
-
-                    if (operation.operationId === functionName) {
-
-                        console.log('=== OPERATION FOUND', operation);
-
-                        // Call the API
-                        const URL = plugin.openApiSpec.servers[0].url + path;
-                        console.log('=== FETCHING: ', URL);
-                        const res = await fetch(URL, {
-                            method: method,
-                            headers: {
-                                'Content-Type': 'application/json'
-                            },
-                            body: JSON.stringify(args)
-                        });
-
-                        const resJson = await res.json();
-
-                        console.log('=== RESPONSE', resJson);
-
-                        // `createFunctionCallMessages` constructs the relevant "assistant" and "function" messages for you
-                        const newMessages = createFunctionCallMessages(resJson);
-                        return openai.chat.completions.create({
-                            messages: [...messages, ...newMessages],
-                            stream: true,
-                            model: 'gpt-4',
-                            // see "Recursive Function Calls" below
-                            functions,
-                        });
-                    }
+            /**
+             * Use Langchain Functions + OpenAPI chain to call the API
+             */ 
+            // Define a callback handler on the LLM so we can capture the function call it wants to make
+            // and show it to the user
+            const handlers = BaseCallbackHandler.fromMethods({
+                handleLLMEnd(outputs) {
+                    const llmGenerations = outputs.generations as ChatGeneration[][];
+                    const llmMessage = llmGenerations[0][0].message as AIMessage;
+                    console.log("=== GPT FUNCTION CALL: ", llmMessage.additional_kwargs.function_call);
                 }
-            }
-            
-            // If we get here, we didn't find the function
-            throw new Error(`Function ${name} not found`);
+            });
+
+            const chatModel = new ChatOpenAI({ temperature: 0, callbacks: [handlers] });
+
+            // TODO: pass full chat history to the chain
+            const chain = await createOpenAPIChain(plugin.openApiSpec, {
+                llm: chatModel,
+                // verbose: true,
+            });
+
+            const lastMessage = messages[messages.length - 1].content;
+            console.log("=== INPUT MESSAGE: ", lastMessage);
+            // OpenAPI chain will return the JSON result from the API call
+            const apiResult = await chain.run(lastMessage);
+
+            console.log("=== API RESPONSE: ", apiResult, "\n\n")
+
+            // `createFunctionCallMessages` constructs the relevant "assistant" and "function" messages for you
+            const newMessages = createFunctionCallMessages(apiResult);
+            return openai.chat.completions.create({
+                messages: [...messages, ...newMessages],
+                stream: true,
+                model: 'gpt-4',
+                // allow recursive function calls (at the Plugin level)
+                functions: pluginsAsFns,
+            });
         },
     });
 
