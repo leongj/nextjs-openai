@@ -67,7 +67,7 @@ export async function POST(req: Request) {
         model: 'gpt-4',
         stream: true,
         messages,
-        functions: pluginsAsFns
+        functions: pluginsAsFns.length > 0 ? pluginsAsFns : undefined,
     });
 
     const stream = OpenAIStream(response, {
