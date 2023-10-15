@@ -1,9 +1,9 @@
 {
   "schema_version": "v1",
   "name_for_human": "Weather Data API",
-  "name_for_model": "weather_data",
+  "name_for_model": "Weather_Data",
   "description_for_human": "Retrieve weather data for a given location.",
-  "description_for_model": "Plugin for retrieving weather data for a given location.",
+  "description_for_model": "Assistant uses this to retrieve weather data for a given location.",
   "auth": {
       "type": "none"
   },
